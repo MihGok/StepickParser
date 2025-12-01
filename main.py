@@ -5,18 +5,21 @@ from CourseProcessor.CourseParser.CourseParser import CourseAnalyzer
 
 if __name__ == '__main__':
     try:
-        # client = StepikCoureLoader()
-        # print("\n" + "="*80)
-        # print("ТЕСТИРОВАНИЕ: Попытка доступа к курсу 4852")
-        # print("="*80)
+        client = StepikCoureLoader()
+        print("\n" + "="*80)
+        client = StepikCoureLoader()
+        target_ids = client.get_course_ids_by_query(query="Python", language="ru", limit=100)
+        print(f"Найдено курсов: {target_ids}")
+        print("ТЕСТИРОВАНИЕ: Попытка доступа к курсу 4852")
+        print("="*80)
         
-        # courses = client.fetch_objects('courses', [4852])
-        # if courses:
-        #     for c in courses:
-        #         client.process_course(c)
-        #     print('\nГотово!')
-        # else:
-        #     print('Курс не найден')
+        courses = client.fetch_objects('courses', [4852])
+        if courses:
+            for c in courses:
+                client.process_course(c)
+            print('\nГотово!')
+        else:
+            print('Курс не найден')
         dir = "Course_4852_Введение в Data Science и машинное обучение"
         cp = CourseAnalyzer(dir)
         result = cp.parse()

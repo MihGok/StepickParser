@@ -195,6 +195,59 @@ class StepikCoureLoader:
             'Authorization': auth_header if auth_header else f'Bearer {self.token}',
             'Content-Type': 'application/json'
         }
+    
+
+    def get_course_ids_by_query(self, query: str, language: str = 'ru', limit: int = 50) -> List[int]:
+        """
+        Ищет ID курсов по запросу с фильтрацией:
+        - язык (по умолчанию ru)
+        - бесплатные
+        - публичные
+        Возвращает список ID.
+        """
+        print(f"[SEARCH] Ищу курсы по запросу '{query}' (lang={language}, limit={limit})...")
+        url = f"{self.API_URL}/search-results"
+        course_ids = []
+        page = 1
+        
+        while len(course_ids) < limit:
+            params = {
+                'query': query,
+                'is_public': 'true',
+                'is_paid': 'false',
+                'language': language,
+                'type': 'course',
+                'page': page
+            }
+            
+            response = self._fetch_single_raw(url=url, headers=self._get_headers(), params=params)
+            
+            if not response or response.status_code != 200:
+                print(f"[SEARCH] Ошибка запроса на странице {page}")
+                break
+
+            data = response.json()
+            results = data.get('search-results', [])
+            meta = data.get('meta', {})
+            
+            if not results:
+                print("[SEARCH] Результаты закончились.")
+                break
+
+            for r in results:
+                cid = r.get('target_id') or r.get('target')
+                if cid and cid not in course_ids:
+                    course_ids.append(cid)
+            
+            print(f"  -> Страница {page}: найдено {len(results)}, всего собрано {len(course_ids)}")
+
+            if not meta.get('has_next'):
+                break
+                
+            page += 1
+            time.sleep(1.5)
+
+        return course_ids[:limit]
 
     def _sanitize_filename(self, name: Any) -> str:
         name = str(name or '').strip()
