@@ -1,24 +1,14 @@
 import re
 import html
-from typing import Any, Dict, Optional, List, Iterator
-
+from typing import Any, Dict, Optional, List
 
 class StepAnalyzer:
     """
-    Парсинг отдельного шага (step JSON).
-    Правила:
-      - Игнорировать блоки с именами choice/matching (и их вариации).
-      - Для text/code/html/markdown сохраняем очищенный от HTML текст (block['text']).
-      - Для video сохраняем минимальную ссылку (360p если есть, иначе наименьшее числовое качество)
-        в поле 'video_url' и добавляем пустое поле 'transcript'.
-      - Для других блоков: если есть поле text — возвращаем его очищенным, иначе игнорируем.
-      - Если block — список, берём первый элемент.
-    Возвращает словарь с полями:
-        { "step_id", "position", "block_name", "text", "video_url", "transcript", "source_file" }
-    или None, если блок игнорируется / неполезен.
+    Парсинг отдельного шага. 
+    Добавлено: извлечение update_date.
     """
 
-    IGNORE_BLOCK_NAMES = {"choice", "matching", "match", "multi_choice", "multiple_choice"}
+    IGNORE_BLOCK_NAMES = {"choice", "matching", "match", "multi_choice", "multiple_choice", "code"}
 
     @staticmethod
     def _normalize_block(block_like: Any) -> Optional[Dict[str, Any]]:
@@ -34,6 +24,7 @@ class StepAnalyzer:
     def _clean_html(text: Optional[str]) -> str:
         if not text:
             return ""
+        # Можно заменить на BeautifulSoup для надежности, но пока оставим ваш regex
         text = html.unescape(text)
         text = re.sub(r'(?i)<br\s*/?>', '\n', text)
         text = re.sub(r'<[^>]+>', '', text)
@@ -48,10 +39,6 @@ class StepAnalyzer:
             else:
                 cleaned_lines.append(ln)
                 prev_empty = False
-        while cleaned_lines and cleaned_lines[0] == "":
-            cleaned_lines.pop(0)
-        while cleaned_lines and cleaned_lines[-1] == "":
-            cleaned_lines.pop()
         return "\n".join(cleaned_lines).strip()
 
     @staticmethod
@@ -63,28 +50,22 @@ class StepAnalyzer:
         for e in urls:
             q = e.get("quality")
             u = e.get("url") or e.get("src") or e.get("link")
-            if not u:
-                continue
+            if not u: continue
             if isinstance(q, str):
                 m = re.search(r'(\d+)', q)
                 if m:
                     try:
                         numeric_pairs.append((int(m.group(1)), u))
                         continue
-                    except Exception:
-                        pass
+                    except: pass
             fallback.append(u)
 
         if numeric_pairs:
             numeric_pairs.sort(key=lambda x: x[0])
             for qv, u in numeric_pairs:
-                if qv == 360:
-                    return u
+                if qv == 360: return u
             return numeric_pairs[0][1]
-
-        if fallback:
-            return fallback[-1]
-        return None
+        return fallback[-1] if fallback else None
 
     @classmethod
     def parse_step_dict(cls, step: Dict[str, Any], source_file: Optional[str] = None) -> Optional[Dict[str, Any]]:
@@ -93,6 +74,8 @@ class StepAnalyzer:
 
         sid = step.get("id")
         pos = step.get("position")
+        # Извлекаем дату обновления
+        update_date = step.get("update_date", "")
 
         raw_block = cls._normalize_block(step.get("block"))
         if not raw_block:
@@ -105,6 +88,7 @@ class StepAnalyzer:
         result = {
             "step_id": sid,
             "position": pos,
+            "update_date": update_date, # Новое поле
             "block_name": block_name,
             "text": "",
             "video_url": "",
@@ -115,8 +99,7 @@ class StepAnalyzer:
         if block_name in {"text", "code", "html", "markdown"}:
             raw_text = raw_block.get("text") or ""
             cleaned = cls._clean_html(raw_text)
-            if not cleaned:
-                return None
+            if not cleaned: return None
             result["text"] = cleaned
             return result
 
@@ -127,7 +110,6 @@ class StepAnalyzer:
                 best = cls._pick_min_quality_url(urls)
                 if best:
                     result["video_url"] = best
-                    result["transcript"] = ""
                     raw_text = raw_block.get("text") or ""
                     result["text"] = cls._clean_html(raw_text)
                     return result

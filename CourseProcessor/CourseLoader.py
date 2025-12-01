@@ -193,7 +193,8 @@ class StepikCoureLoader:
         auth_header = self.session.headers.get("Authorization")
         return {
             'Authorization': auth_header if auth_header else f'Bearer {self.token}',
-            'Content-Type': 'application/json'
+            'Content-Type': 'application/json',
+            'Referer': 'https://stepik.org/'
         }
     
 
