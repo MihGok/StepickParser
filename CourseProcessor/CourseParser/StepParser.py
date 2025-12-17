@@ -1,6 +1,7 @@
 import re
 import html
 from typing import Any, Dict, Optional, List
+from bs4 import BeautifulSoup
 
 class StepAnalyzer:
     """
@@ -24,22 +25,23 @@ class StepAnalyzer:
     def _clean_html(text: Optional[str]) -> str:
         if not text:
             return ""
-        # Можно заменить на BeautifulSoup для надежности, но пока оставим ваш regex
-        text = html.unescape(text)
-        text = re.sub(r'(?i)<br\s*/?>', '\n', text)
-        text = re.sub(r'<[^>]+>', '', text)
-        lines = [re.sub(r'[ \t\f\v]+', ' ', ln).strip() for ln in text.splitlines()]
-        cleaned_lines = []
-        prev_empty = False
-        for ln in lines:
-            if ln == "":
-                if not prev_empty:
-                    cleaned_lines.append("")
-                prev_empty = True
-            else:
-                cleaned_lines.append(ln)
-                prev_empty = False
-        return "\n".join(cleaned_lines).strip()
+        
+        soup = BeautifulSoup(text, 'html.parser')
+        
+        # Сохраняем код отдельно
+        code_blocks = []
+        for code in soup.find_all(['code', 'pre']):
+            code_blocks.append(f"\n```\n{code.get_text()}\n```\n")
+            code.replace_with(f"__CODE_BLOCK_{len(code_blocks)-1}__")
+        
+        # Очищаем остальное
+        text = soup.get_text(separator='\n')
+        
+        # Возвращаем код
+        for i, block in enumerate(code_blocks):
+            text = text.replace(f"__CODE_BLOCK_{i}__", block)
+        
+        return text.strip()    
 
     @staticmethod
     def _pick_min_quality_url(urls: List[Dict[str, Any]]) -> Optional[str]:
