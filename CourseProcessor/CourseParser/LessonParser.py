@@ -3,7 +3,7 @@ import json
 import re
 from typing import Any, Dict, List, Iterator
 from .StepParser import StepAnalyzer
-from CourseProcessor.TranskriberClient import TranscriberClient
+from CourseProcessor.Client import Client
 
 
 class LessonAnalyzer:
@@ -44,7 +44,7 @@ class LessonAnalyzer:
         lesson_specific_dir = os.path.join(self.knowledge_base_dir, clean_lesson_name)
         os.makedirs(lesson_specific_dir, exist_ok=True)
 
-        filename = f"step_{step_id}.txt"
+        filename = f"content.txt"
         filepath = os.path.join(lesson_specific_dir, filename)
 
         content_parts = []
@@ -100,7 +100,7 @@ class LessonAnalyzer:
                 continue
 
             if parsed.get("video_url") and not parsed.get("transcript"):
-                transcript = TranscriberClient.transcribe(parsed["video_url"], parsed["step_id"])
+                transcript = Client.transcribe(parsed["video_url"], parsed["step_id"])
                 if transcript:
                     parsed["transcript"] = transcript
                     raw_step_obj["_generated_transcript"] = transcript
