@@ -67,7 +67,7 @@ def make_request_with_retry(func):
     return wrapper
 
 
-class StepikCoureLoader:
+class StepikCourseLoader:
     API_URL = "https://stepik.org/api"
     OAUTH_URL = "https://stepik.org/oauth2/token/"
     AUTH_URL = "https://stepik.org/oauth2/authorize/"
@@ -79,8 +79,18 @@ class StepikCoureLoader:
         self.client_secret = os.getenv("STEPIK_CLIENT_SECRET")
         if not self.client_id or not self.client_secret:
             raise ValueError("Не найдены STEPIK_CLIENT_ID или STEPIK_CLIENT_SECRET в .env")
-
+        
+        USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 YaBrowser/25.10.0.0 Safari/537.36"
         self.session = requests.Session()
+        self.session.headers.update({
+            'User-Agent': USER_AGENT,
+            'Accept': 'application/json, text/plain, */*',
+            'Accept-Language': 'ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7',
+            'Referer': 'https://stepik.org/',
+            'Origin': 'https://stepik.org',
+            'Connection': 'keep-alive',
+        })
+        
         self.token = self._login_flow()
         if self.token:
             self.session.headers.update({'Authorization': f'Bearer {self.token}'})

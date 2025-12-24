@@ -7,7 +7,6 @@ class Client:
 
     @classmethod
     def transcribe(cls, video_url: str, step_id: int) -> str:
-        # Этот метод корректен, ЕСЛИ вы обновили сервер под прием JSON (video_url)
         if not video_url:
             return ""
 
