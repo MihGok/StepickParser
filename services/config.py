@@ -1,6 +1,8 @@
 import os
 import requests
 from typing import Optional
+from dotenv import load_dotenv
+load_dotenv()
 
 class ProxyConfig:
     """Централизованная конфигурация прокси для всего проекта"""
@@ -86,7 +88,7 @@ class AppConfig:
     
     # Gemini
     GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.0-flash-exp")
+    GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     
     # Stepik
     STEPIK_CLIENT_ID = os.getenv("STEPIK_CLIENT_ID")

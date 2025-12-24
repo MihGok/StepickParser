@@ -7,11 +7,11 @@ from typing import List, Optional
 import requests
 import uvicorn
 
-from .core.model_manager import model_manager
-from .services.whisper_service import WhisperService
-from .services.llava_service import LlavaService
-from .services.clip_service import ClipService
-from .services.text_encoder_service import TextEncoderService
+from core.model_manager import model_manager
+from services.whisper_service import WhisperService
+from services.llava_service import LlavaService
+from services.clip_service import ClipService
+from services.text_encoder_service import TextEncoderService
 
 app = FastAPI()
 TEMP_DIR = "server_temp"
@@ -38,7 +38,13 @@ async def transcribe(req: TranscribeRequest):
         
         whisper = model_manager.get_model("whisper", WhisperService)
         segments = whisper.transcribe(path)
-        return {"transcript": " ".join([s.text for s in segments])}
+        return {
+            "transcript": " ".join([s.text for s in segments]),
+            "segments": [
+                {"start": s.start, "end": s.end, "text": s.text.strip()} 
+                for s in segments
+            ]
+        }
     finally:
         if os.path.exists(path): os.remove(path)
 

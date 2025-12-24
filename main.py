@@ -1,26 +1,31 @@
 import os
 import sys
+import shutil
 from typing import List, Dict
 
 # Добавляем пути импорта
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import uvicorn
 from CourseProcessor.CourseLoader import StepikCourseLoader
 from CourseProcessor.CourseParser.CourseParser import CourseAnalyzer
+# Импортируем индексатор для векторизации
+from CourseProcessor.indexing.qdrant_indexer import QdrantKnowledgeBaseIndexer
 
-# Наши новые сервисы
+# Импорт конфигурации
+from services.config import AppConfig
+
+# Сервисы
 from services.LLM_Service.llm_service import GeminiService
 from services.LLM_Service.schemas import CourseValidationResult
 from services.LLM_Service.prompts import COURSE_FILTER_PROMPT_RU
 
-SEARCH_QUERY = "Deep Learning"
+# 1. Список запросов согласно заданию
+TARGET_QUERIES = ["Python", "ML", "Мат статистика"]
 
 def filter_courses_with_ai(query: str, raw_courses: List[Dict]) -> List[Dict]:
     """Фильтрация списка курсов через Gemini"""
     if not raw_courses: return []
     
-    # Формируем список для промпта
     courses_text_list = []
     for c in raw_courses:
         courses_text_list.append(f"ID: {c['id']}, Title: {c['title']}")
@@ -30,7 +35,7 @@ def filter_courses_with_ai(query: str, raw_courses: List[Dict]) -> List[Dict]:
         courses_list="\n".join(courses_text_list)
     )
     
-    print(f"\n[AI Filter] Анализирую {len(raw_courses)} курсов...")
+    print(f"\n[AI Filter] Анализирую {len(raw_courses)} курсов для запроса '{query}'...")
     try:
         llm = GeminiService()
         result: CourseValidationResult = llm.generate(
@@ -39,7 +44,6 @@ def filter_courses_with_ai(query: str, raw_courses: List[Dict]) -> List[Dict]:
             temperature=0.1
         )
         
-        # Оставляем только те курсы, чьи ID вернула модель
         valid_ids = set(result.relevant_ids)
         filtered = [c for c in raw_courses if c['id'] in valid_ids]
         
@@ -47,62 +51,93 @@ def filter_courses_with_ai(query: str, raw_courses: List[Dict]) -> List[Dict]:
         return filtered
     except Exception as e:
         print(f"[AI Filter Error] {e}")
-        return raw_courses[:1] # Fallback: возвращаем хотя бы первый
+        # Fallback: возвращаем первые 5, если AI сломался
+        return raw_courses[:5]
 
-def main(limit: int = 20):
-    print(f"\n{'='*60}")
-    print(f"🚀 ЗАПУСК SMART PIPELINE: '{SEARCH_QUERY}'")
-    print(f"{'='*60}\n")
-    
-    loader = StepikCourseLoader()
-    
-    # 1. Поиск курсов (получаем объекты, а не просто ID)
-    # Предполагаем, что loader.get_courses_by_query возвращает список словарей [{'id': 1, 'title': '...'}, ...]
-    # Если в CourseLoader только get_course_ids_by_query, нужно немного адаптировать
-    found_ids = loader.get_course_ids_by_query(query=SEARCH_QUERY, limit=limit)
+def process_single_query(query: str, loader: StepikCourseLoader, courses_limit: int = 5):
+    """Полный цикл обработки для одного поискового запроса"""
+    print(f"\n{'#'*60}")
+    print(f"🔍 ОБРАБОТКА ЗАПРОСА: '{query}'")
+    print(f"{'#'*60}\n")
+
+    # 1. Поиск курсов (ищем с запасом, чтобы было из чего выбирать AI)
+    found_ids = loader.get_course_ids_by_query(query=query, limit=20)
     
     raw_courses = []
     for cid in found_ids:
-        # Для фильтрации нам нужны названия. Делаем легкий запрос (или берем из кэша поиска если есть)
         c_obj = loader.fetch_object_single('courses', cid)
         if c_obj:
             raw_courses.append({'id': c_obj['id'], 'title': c_obj['title']})
             
     if not raw_courses:
-        print("[STOP] Курсы не найдены.")
+        print(f"[STOP] Курсы по запросу '{query}' не найдены.")
         return
 
     # 2. AI Фильтрация
-    best_courses = filter_courses_with_ai(SEARCH_QUERY, raw_courses)
+    best_courses = filter_courses_with_ai(query, raw_courses)
     
     if not best_courses:
-        print("[STOP] ИИ отклонил все найденные курсы как нерелевантные.")
+        print(f"[STOP] ИИ отклонил все курсы по запросу '{query}'.")
         return
 
-    target_course = best_courses[0]
-    print(f"\n[INFO] Выбран лучший курс: {target_course['title']} (ID: {target_course['id']})")
+    # 3. Берем ТОП-5 (или меньше, если столько нет)
+    target_courses = best_courses[:courses_limit]
+    print(f"\n[INFO] Будет загружено курсов: {len(target_courses)}")
+
+    for idx, target_course in enumerate(target_courses, 1):
+        print(f"\n--- Обработка курса {idx}/{len(target_courses)}: {target_course['title']} (ID: {target_course['id']}) ---")
+        
+        # 3.1 Загрузка контента
+        full_course_obj = loader.fetch_object_single('courses', target_course['id'])
+        loader.process_course(full_course_obj)
+        
+        # Определяем имя папки курса
+        safe_title = loader._sanitize_filename(full_course_obj['title'])
+        course_dir_name = f"Course_{target_course['id']}_{safe_title}"
+        
+        # Фикс имени папки (на случай если loader обрезал длинное имя)
+        if not os.path.isdir(course_dir_name):
+            possible = [d for d in os.listdir('.') if d.startswith(f"Course_{target_course['id']}")]
+            if possible: course_dir_name = possible[0]
+        
+        # 3.2 Парсинг контента в текстовые файлы (БЕЗ индексации пока что)
+        # CourseAnalyzer сохраняет результат в knowledge_base/{query}/...
+        analyzer = CourseAnalyzer(course_dir_name, search_query=query)
+        analyzer.parse()
+
+    # 4. ИНДЕКСАЦИЯ (Векторизация) для текущего запроса
+    # Это выполняется после обработки всех 5 курсов, чтобы собрать общую базу по теме
+    print(f"\n>>> 🧠 ЗАПУСК ВЕКТОРИЗАЦИИ (QDRANT) ДЛЯ '{query}'...")
     
-    # 3. Загрузка контента (StepikLoader)
-    # Нужно получить полный объект для процессинга
-    full_course_obj = loader.fetch_object_single('courses', target_course['id'])
-    loader.process_course(full_course_obj)
+    kb_dir_for_query = os.path.join(AppConfig.KNOWLEDGE_BASE_DIR, query)
     
-    # Определяем папку
-    safe_title = loader._sanitize_filename(full_course_obj['title'])
-    course_dir_name = f"Course_{target_course['id']}_{safe_title}"
+    if os.path.exists(kb_dir_for_query):
+        indexer = QdrantKnowledgeBaseIndexer(knowledge_base_dir=kb_dir_for_query)
+        
+        # Индексация текстов (Вызывает text_embed_batch на бэкенде)
+        indexer.index_lessons()
+        
+        # Индексация картинок (Описания и метаданные)
+        indexer.index_images()
+        
+        print(f">>> ✅ Векторизация для '{query}' завершена.")
+    else:
+        print(f">>> ⚠️ Папка базы знаний не найдена: {kb_dir_for_query}")
+
+def main():
+    loader = StepikCourseLoader()
     
-    # Фикс имени папки (если StepikLoader обрезал имя)
-    if not os.path.isdir(course_dir_name):
-        possible = [d for d in os.listdir('.') if d.startswith(f"Course_{target_course['id']}")]
-        if possible: course_dir_name = possible[0]
-    
-    # 4. Парсинг и Создание Базы Знаний
-    print("\n>>> ЗАПУСК ПАРСЕРА И ВАЛИДАЦИИ КОНТЕНТА...")
-    analyzer = CourseAnalyzer(course_dir_name, search_query=SEARCH_QUERY)
-    results = analyzer.parse()
+    # Цикл по всем запросам ("Python", "ML", "Мат статистика")
+    for query in TARGET_QUERIES:
+        try:
+            process_single_query(query, loader, courses_limit=2)
+        except Exception as e:
+            print(f"\n[CRITICAL ERROR] Ошибка при обработке запроса '{query}': {e}")
+            import traceback
+            traceback.print_exc()
 
     print("\n" + "="*60)
-    print(f">>> ГОТОВО! В базу знаний добавлено {len(results)} элементов.")
+    print("🚀 ВСЕ ЗАДАЧИ ЗАВЕРШЕНЫ")
     print("="*60)
 
 if __name__ == '__main__':
