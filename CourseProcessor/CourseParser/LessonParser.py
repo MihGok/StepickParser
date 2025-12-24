@@ -1,22 +1,3 @@
-import os
-import json
-import re
-import cv2
-import shutil
-import numpy as np
-import requests
-import google.generativeai as genai
-from typing import Any, Dict, List, Iterator, Optional, Tuple
-
-from .StepParser import StepAnalyzer
-from ..client_api import Client
-from services.storage_service import StorageService
-
-# Импорт сервисов LLM
-from services.LLM_Service.llm_service import GeminiService
-from services.LLM_Service.schemas import VideoAnalysisResult
-from services.LLM_Service.prompts import ANALYZE_TRANSCRIPT_PROMPT_RU
-
 class LessonAnalyzer:
     STEP_FILENAME_PREFIX = "step_"
     STEP_FILENAME_SUFFIX = ".json"
@@ -25,11 +6,15 @@ class LessonAnalyzer:
         self.lesson_dir = lesson_dir
         self.knowledge_base_dir = knowledge_base_dir
         self.storage = StorageService()
-        self.llm_service = GeminiService() # Используем наш унифицированный сервис
+        self.llm_service = GeminiService()
+        
+        # НОВОЕ: Создаем директорию для временных файлов
+        self.temp_base_dir = AppConfig.TEMP_DIR
+        os.makedirs(self.temp_base_dir, exist_ok=True)
 
-    # ... (методы iter_step_files, _clean_lesson_title без изменений) ...
     def iter_step_files(self) -> Iterator[str]:
-        if not os.path.isdir(self.lesson_dir): return
+        if not os.path.isdir(self.lesson_dir):
+            return
         for fname in sorted(os.listdir(self.lesson_dir)):
             if fname.startswith(self.STEP_FILENAME_PREFIX) and fname.endswith(self.STEP_FILENAME_SUFFIX):
                 yield os.path.join(self.lesson_dir, fname)
@@ -40,8 +25,9 @@ class LessonAnalyzer:
         return re.sub(r'[<>:"/\\|?*]', '', clean_name).strip()
 
     def _get_analysis_from_gemini(self, transcript: str, duration: float) -> Optional[VideoAnalysisResult]:
-        """Получает таймкоды и 'reason' (ожидаемое описание)"""
-        if not transcript: return None
+        """Получает таймкоды и 'reason' от Gemini"""
+        if not transcript:
+            return None
         
         prompt = ANALYZE_TRANSCRIPT_PROMPT_RU.format(
             duration=duration,
@@ -52,7 +38,7 @@ class LessonAnalyzer:
             return self.llm_service.generate(
                 prompt=prompt,
                 response_schema=VideoAnalysisResult,
-                model_name="gemini-1.5-flash", # Или 2.0-flash, если доступна
+                model_name=AppConfig.GEMINI_MODEL,
                 temperature=0.2
             )
         except Exception as e:
@@ -61,77 +47,113 @@ class LessonAnalyzer:
 
     def _calculate_similarity(self, text1: str, text2: str) -> float:
         """Считает косинусную схожесть двух текстов через TextEncoder (MPNet)"""
-        if not text1 or not text2: return 0.0
+        if not text1 or not text2:
+            return 0.0
         
-        # Получаем вектора через ML Backend (Client API)
         vec1 = Client.get_text_embedding(text1)
         vec2 = Client.get_text_embedding(text2)
         
-        if not vec1 or not vec2: return 0.0
+        if not vec1 or not vec2:
+            return 0.0
         
-        # Cosine similarity
         v1 = np.array(vec1)
         v2 = np.array(vec2)
-        return np.dot(v1, v2) / (np.linalg.norm(v1) * np.linalg.norm(v2))
+        dot_product = np.dot(v1, v2)
+        norm_product = np.linalg.norm(v1) * np.linalg.norm(v2)
+        
+        if norm_product == 0:
+            return 0.0
+            
+        return float(dot_product / norm_product)
 
     def _process_video(self, video_url: str, transcript: str, step_id: int, lesson_name: str) -> List[Dict]:
-        """Новая логика: 5 скриншотов -> LLaVA -> Сравнение с Reason -> Выбор лучшего"""
-        temp_dir = os.path.join("temp_frames", str(step_id))
+        """
+        ИСПРАВЛЕНО: Скачивание видео с правильным прокси
+        """
+        temp_dir = os.path.join(self.temp_base_dir, f"frames_{step_id}")
         os.makedirs(temp_dir, exist_ok=True)
         video_path = os.path.join(temp_dir, "video.mp4")
         final_frames_data = []
 
         try:
-            # 1. Скачивание
-            print(f"   [Video] Скачивание...")
-            with requests.get(video_url, stream=True) as r:
-                r.raise_for_status()
-                with open(video_path, 'wb') as f:
-                    for chunk in r.iter_content(8192): f.write(chunk)
+            # ИСПРАВЛЕНИЕ: Используем ProxyConfig для скачивания
+            print(f"   [Video] Скачивание с URL: {video_url[:50]}...")
+            if not ProxyConfig.download_file(video_url, video_path, use_proxy=True):
+                print("   [Video] Не удалось скачать видео")
+                return []
 
-            # 2. Метаданные видео
+            # Проверка что файл скачался
+            if not os.path.exists(video_path) or os.path.getsize(video_path) == 0:
+                print("   [Video] Файл пуст или не создан")
+                return []
+
+            # Метаданные видео
             cap = cv2.VideoCapture(video_path)
+            if not cap.isOpened():
+                print("   [Video] OpenCV не смог открыть видео")
+                return []
+                
             fps = cap.get(cv2.CAP_PROP_FPS)
-            frames_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            frames_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
             duration = frames_count / fps if fps > 0 else 0
             
-            # 3. Gemini Анализ (получаем timestamp и reason)
+            if duration == 0:
+                print("   [Video] Не удалось определить длительность")
+                cap.release()
+                return []
+            
+            print(f"   [Video] Длительность: {duration:.1f}s, FPS: {fps:.1f}")
+            
+            # Gemini Анализ
             analysis = self._get_analysis_from_gemini(transcript, duration)
-            if not analysis:
-                print("   [Skip] Gemini не вернул таймкоды.")
+            if not analysis or not analysis.timestamps:
+                print("   [Video] Gemini не вернул таймкоды")
+                cap.release()
                 return []
 
             timestamps_tasks = analysis.timestamps
-            print(f"   [Video] Проверка {len(timestamps_tasks)} смысловых блоков...")
+            print(f"   [Video] Анализ {len(timestamps_tasks)} смысловых блоков...")
 
-            # 4. Цикл по смысловым блокам
-            for task in timestamps_tasks:
+            # Цикл по смысловым блокам
+            for idx, task in enumerate(timestamps_tasks):
                 start_time = task.timestamp
                 expected_reason = task.reason
                 
+                if start_time > duration:
+                    print(f"   [Skip] Таймкод {start_time}s вне диапазона видео")
+                    continue
+                
+                print(f"   [{idx+1}/{len(timestamps_tasks)}] t={start_time:.1f}s: {expected_reason[:40]}...")
+                
                 candidates = []
 
+                # Проверяем 5 кандидатов с интервалом 3 секунды
                 for offset in [0, 3, 6, 9, 12]:
                     current_ts = start_time + offset
-                    if current_ts > duration: break
+                    if current_ts > duration:
+                        break
                     
                     cap.set(cv2.CAP_PROP_POS_MSEC, current_ts * 1000)
                     ret, frame = cap.read()
-                    if not ret: continue
+                    if not ret or frame is None:
+                        continue
                     
                     # Сохраняем кандидат
                     cand_path = os.path.join(temp_dir, f"cand_{int(current_ts)}.jpg")
-                    cv2.imwrite(cand_path, frame)
+                    if not cv2.imwrite(cand_path, frame):
+                        print(f"      [Warn] Не удалось сохранить {cand_path}")
+                        continue
                     
-                    # Получаем описание LLaVA (Реальность)
+                    # Получаем описание LLaVA
                     llava_desc = Client.get_image_description(cand_path)
-                    if not llava_desc: continue
+                    if not llava_desc:
+                        continue
                     
-                    # Считаем схожесть (Ожидание vs Реальность)
+                    # Считаем схожесть
                     score = self._calculate_similarity(expected_reason, llava_desc)
-                    print(f"      t={current_ts:.1f}s | Score: {score:.3f} | LLaVA: {llava_desc[:30]}...")
+                    print(f"      t={current_ts:.1f}s | Score: {score:.3f}")
                     
-                    if score > 0.60:
+                    if score > 0.55:  # Порог снижен с 0.60
                         candidates.append({
                             "score": score,
                             "path": cand_path,
@@ -139,11 +161,10 @@ class LessonAnalyzer:
                             "ts": current_ts
                         })
                 
-                # Выбираем победителя
+                # Выбираем лучший кадр
                 if candidates:
-                    # Сортируем по убыванию score
-                    best_cand = sorted(candidates, key=lambda x: x["score"], reverse=True)[0]
-                    print(f"   [Match] Выбран кадр {best_cand['ts']:.1f}s (Score: {best_cand['score']:.3f})")
+                    best_cand = max(candidates, key=lambda x: x["score"])
+                    print(f"   ✓ Выбран кадр t={best_cand['ts']:.1f}s (Score: {best_cand['score']:.3f})")
                     
                     # Загрузка в MinIO
                     s3_key = f"{lesson_name}/step_{step_id}/{int(best_cand['ts'])}.jpg"
@@ -156,22 +177,27 @@ class LessonAnalyzer:
                             "expected_reason": expected_reason
                         })
                 else:
-                    print(f"   [Fail] Ни один кадр не прошел порог 0.60 для: '{expected_reason}'")
+                    print(f"   ✗ Нет подходящих кадров для: '{expected_reason[:40]}...'")
 
             cap.release()
+            print(f"   [Video] Итого выбрано кадров: {len(final_frames_data)}")
             
         except Exception as e:
-            print(f"   [Video Error] {e}")
+            print(f"   [Video Error] {type(e).__name__}: {e}")
+            import traceback
+            traceback.print_exc()
         finally:
+            # Очистка временных файлов
             if os.path.exists(temp_dir):
-                shutil.rmtree(temp_dir)
+                try:
+                    shutil.rmtree(temp_dir)
+                except Exception as e:
+                    print(f"   [Cleanup Warning] Не удалось удалить {temp_dir}: {e}")
 
         return final_frames_data
 
     def _save_lesson_content(self, all_parsed_steps: List[Dict], lesson_name: str):
-        """
-        Сохраняет ВЕСЬ урок в один файл content.txt
-        """
+        """Сохраняет весь урок в один файл content.txt"""
         lesson_dir = os.path.join(self.knowledge_base_dir, lesson_name)
         os.makedirs(lesson_dir, exist_ok=True)
         filepath = os.path.join(lesson_dir, "content.txt")
@@ -180,7 +206,8 @@ class LessonAnalyzer:
 
         for step in all_parsed_steps:
             parts.append(f"\nSTEP ID: {step['step_id']}")
-            if step.get('update_date'): parts.append(f"UPDATED: {step['update_date']}")
+            if step.get('update_date'):
+                parts.append(f"UPDATED: {step['update_date']}")
             parts.append("-" * 20)
             
             if step.get("text"):
@@ -195,21 +222,23 @@ class LessonAnalyzer:
                 f.write("\n".join(parts))
             print(f"   [KB] Сохранен текст урока: {filepath}")
         except Exception as e:
-            print(f"[KB Error] {e}")
+            print(f"   [KB Error] Не удалось сохранить {filepath}: {e}")
 
     def _save_frames_metadata(self, all_frames: List[Dict], lesson_name: str):
         """Сохраняет метаданные картинок для индексации"""
-        if not all_frames: return
+        if not all_frames:
+            return
         
         path = os.path.join(self.knowledge_base_dir, lesson_name, "frames_metadata.json")
         try:
             with open(path, "w", encoding="utf-8") as f:
                 json.dump(all_frames, f, ensure_ascii=False, indent=2)
-            print(f"   [KB] Сохранено {len(all_frames)} кадров в метаданные.")
+            print(f"   [KB] Сохранено {len(all_frames)} кадров в метаданные")
         except Exception as e:
-            print(f"[KB Error] {e}")
+            print(f"   [KB Error] Ошибка сохранения метаданных: {e}")
 
     def parse(self) -> List[Dict[str, Any]]:
+        """Главный метод парсинга урока"""
         parsed_steps = []
         all_frames_metadata = []
         
@@ -222,25 +251,29 @@ class LessonAnalyzer:
             try:
                 with open(step_file, "r", encoding="utf-8") as f:
                     raw_step = json.load(f)
-            except: continue
+            except Exception as e:
+                print(f"   [Error] Не удалось прочитать {step_file}: {e}")
+                continue
 
-            # 1. Базовый парсинг
+            # Базовый парсинг
             parsed = StepAnalyzer.parse_step_dict(raw_step, os.path.basename(step_file))
-            if not parsed: continue
+            if not parsed:
+                continue
 
-            # 2. Транскрибация (Whisper)
+            # Транскрибация
             if parsed.get("video_url") and not parsed.get("transcript"):
                 transcript = Client.transcribe(parsed["video_url"], parsed["step_id"])
                 if transcript:
                     parsed["transcript"] = transcript
-                    # Кешируем обратно в JSON шагa
+                    # Кеш обратно в JSON
                     raw_step["_generated_transcript"] = transcript
                     try:
                         with open(step_file, "w", encoding="utf-8") as f:
                             json.dump(raw_step, f, ensure_ascii=False, indent=2)
-                    except: pass
+                    except:
+                        pass
 
-            # 3. Обработка Видео (Gemini -> OpenCV -> MinIO -> LLaVA)
+            # Обработка видео
             if parsed.get("video_url") and parsed.get("transcript"):
                 frames = self._process_video(
                     parsed["video_url"], 
@@ -249,18 +282,14 @@ class LessonAnalyzer:
                     clean_name
                 )
                 if frames:
-                    # Добавляем в общий список кадров урока
                     for fr in frames:
                         fr['step_id'] = parsed['step_id']
                         fr['lesson_name'] = clean_name
-                        # Удаляем вектор перед сохранением в JSON (он не нужен там)
-                        if 'clip_vector' in fr: del fr['clip_vector']
-                    
                     all_frames_metadata.extend(frames)
 
             parsed_steps.append(parsed)
 
-        # 4. Финальное сохранение (Агрегация)
+        # Сохранение результатов
         self._save_lesson_content(parsed_steps, clean_name)
         self._save_frames_metadata(all_frames_metadata, clean_name)
         

@@ -9,6 +9,8 @@ from dotenv import load_dotenv
 from typing import List, Dict, Any, Optional
 from requests.auth import HTTPBasicAuth
 
+# Импорт конфигураций (Новое)
+from services.config import ProxyConfig, AppConfig
 
 MAX_RETRIES = 5
 BASE_DELAY = 2
@@ -33,12 +35,14 @@ def make_request_with_retry(func):
                 if getattr(response, 'status_code', None) in (200, 201):
                     return response
 
+                # Критические ошибки - не ретраим
                 if response.status_code in (401, 403, 404):
                     print(f"[ERROR] Критическая ошибка {response.status_code}: {getattr(response, 'url', '')}")
                     if response.status_code == 401:
                         print(f"[ERROR] Детали 401: {response.text[:500]}")
                     return response
 
+                # Временные ошибки - ретраим
                 if response.status_code in (429, 500, 502, 503, 504):
                     if attempt < MAX_RETRIES - 1:
                         wait_time = (BASE_DELAY ** attempt) + random.uniform(0, 1)
@@ -61,7 +65,7 @@ def make_request_with_retry(func):
                 print(f"[FAIL] Ошибка сети: {e}")
                 return None
             except Exception as e:
-                print(f"[EXCEPTION] {e}")
+                print(f"[EXCEPTION] {type(e).__name__}: {e}")
                 return None
         return None
     return wrapper
@@ -71,17 +75,20 @@ class StepikCourseLoader:
     API_URL = "https://stepik.org/api"
     OAUTH_URL = "https://stepik.org/oauth2/token/"
     AUTH_URL = "https://stepik.org/oauth2/authorize/"
-
     REDIRECT_URI = "http://localhost:5000/callback"
 
     def __init__(self):
-        self.client_id = os.getenv("STEPIK_CLIENT_ID")
-        self.client_secret = os.getenv("STEPIK_CLIENT_SECRET")
+        # ИСПРАВЛЕНИЕ: Используем AppConfig
+        self.client_id = AppConfig.STEPIK_CLIENT_ID
+        self.client_secret = AppConfig.STEPIK_CLIENT_SECRET
+        
         if not self.client_id or not self.client_secret:
             raise ValueError("Не найдены STEPIK_CLIENT_ID или STEPIK_CLIENT_SECRET в .env")
         
+        # ИСПРАВЛЕНИЕ: Создаем сессию С прокси для Stepik API
+        self.session = ProxyConfig.get_session_with_proxy(use_proxy=True)
+        
         USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 YaBrowser/25.10.0.0 Safari/537.36"
-        self.session = requests.Session()
         self.session.headers.update({
             'User-Agent': USER_AGENT,
             'Accept': 'application/json, text/plain, */*',
@@ -97,23 +104,25 @@ class StepikCourseLoader:
         self._last_raw_response: Optional[Dict[str, Any]] = None
 
     def _login_flow(self) -> Optional[str]:
+        """Логин через OAuth с использованием прокси"""
         if os.path.exists("token_storage.json"):
             try:
                 with open("token_storage.json", "r", encoding='utf-8') as f:
                     data = json.load(f)
                     if data.get('refresh_token'):
-                        print("[AUTH] Обнаружен refresh_token — пробуем обновить access_token...")
+                        print("[AUTH] Обнаружен refresh_token — пробуем обновить...")
                         return self._refresh_access_token(data['refresh_token'])
             except Exception as e:
-                print(f"[AUTH] Ошибка чтения token_storage.json: {e} — удаляю файл и буду просить вход.")
+                print(f"[AUTH] Ошибка чтения token_storage.json: {e}")
                 try:
                     os.remove("token_storage.json")
-                except Exception:
+                except:
                     pass
 
         return self._authorize_user_manual()
 
     def _save_tokens(self, tokens: Dict[str, Any]):
+        """Сохраняет токены в файл"""
         with open("token_storage.json", "w", encoding='utf-8') as f:
             json.dump(tokens, f, ensure_ascii=False, indent=2)
         print("[AUTH] Токены сохранены в token_storage.json")
@@ -121,6 +130,7 @@ class StepikCourseLoader:
             print(f"[AUTH] Полученные scopes: {tokens['scope']}")
 
     def _exchange_code_for_token(self, code: str) -> Optional[str]:
+        """Обмен кода на токен (используется прокси автоматически)"""
         auth = HTTPBasicAuth(self.client_id, self.client_secret)
 
         @make_request_with_retry
@@ -145,6 +155,7 @@ class StepikCourseLoader:
         return access
 
     def _authorize_user_manual(self) -> Optional[str]:
+        """Ручная авторизация через браузер"""
         params = {
             'response_type': 'code',
             'client_id': self.client_id,
@@ -161,7 +172,7 @@ class StepikCourseLoader:
         print('='*80)
         print('\nОТКРОЙТЕ ССЫЛКУ В БРАУЗЕРЕ ДЛЯ АВТОРИЗАЦИИ:')
         print(auth_link)
-        print('\nПосле авторизации /callback в URL будет параметр ?code=... — вставьте этот код сюда.')
+        print('\nПосле авторизации /callback в URL будет параметр ?code=... — вставьте его сюда.')
         print('='*80 + '\n')
 
         code = input('Вставьте code из URL: ').strip()
@@ -170,6 +181,7 @@ class StepikCourseLoader:
         return self._exchange_code_for_token(code)
 
     def _refresh_access_token(self, refresh_token: str) -> Optional[str]:
+        """Обновление токена (используется прокси)"""
         auth = HTTPBasicAuth(self.client_id, self.client_secret)
 
         @make_request_with_retry
@@ -188,7 +200,7 @@ class StepikCourseLoader:
             print("[AUTH] Удаляю старый токен и запрашиваю новую авторизацию...")
             try:
                 os.remove("token_storage.json")
-            except Exception:
+            except:
                 pass
             return self._authorize_user_manual()
 
@@ -200,6 +212,7 @@ class StepikCourseLoader:
         return access
 
     def _get_headers(self) -> Dict[str, str]:
+        """Возвращает заголовки для запросов"""
         auth_header = self.session.headers.get("Authorization")
         return {
             'Authorization': auth_header if auth_header else f'Bearer {self.token}',
@@ -207,6 +220,16 @@ class StepikCourseLoader:
             'Referer': 'https://stepik.org/'
         }
     
+    @make_request_with_retry
+    def _fetch_single_raw(self, url: str, headers: Dict[str, str], params: Any = None) -> Optional[requests.Response]:
+        """Базовый метод для GET запросов (прокси уже в session)"""
+        try:
+            return self.session.get(url, headers=headers, params=params, timeout=20)
+        except Exception as e:
+            print(f"[HTTP GET ERROR] {type(e).__name__}: {e}")
+            return None
+
+    # --- МЕТОДЫ ПАРСИНГА И РАБОТЫ С КУРСОМ (СОХРАНЕНЫ ИЗ СТАРОЙ ВЕРСИИ) ---
 
     def get_course_ids_by_query(self, query: str, language: str = 'ru', limit: int = 50) -> List[int]:
         """
@@ -268,14 +291,6 @@ class StepikCourseLoader:
             return 'Unnamed'
         return name
 
-    @make_request_with_retry
-    def _fetch_single_raw(self, url: str, headers: Dict[str, str], params: Any = None) -> Optional[requests.Response]:
-        try:
-            return self.session.get(url, headers=headers, params=params, timeout=20)
-        except Exception as e:
-            print(f"[HTTP GET ERROR] {e}")
-            return None
-
     def fetch_object_single(self, object_type: str, object_id: int) -> Dict[str, Any]:
         url = f"{self.API_URL}/{object_type}/{object_id}"
         response = self._fetch_single_raw(url=url, headers=self._get_headers())
@@ -326,6 +341,10 @@ class StepikCourseLoader:
             }
         }
         
+        # Обертка уже не нужна, так как _make_request внутри session post используется в декораторе
+        # Но здесь мы используем session.post напрямую, поэтому нужен декоратор или обработка
+        # Т.к. enroll_in_course - это POST, используем обертку
+        
         @make_request_with_retry
         def execute():
             return self.session.post(
@@ -350,16 +369,6 @@ class StepikCourseLoader:
         
         elif response and response.status_code == 401:
             print(f"[ERROR] 401 Unauthorized при записи на курс {course_id}")
-            print("[ERROR] Возможные причины:")
-            print("  1. OAuth приложение не имеет scope 'write'")
-            print("  2. Токен устарел или недействителен")
-            print("  3. Приложение создано с неправильными настройками")
-            print("\n[FIX] РЕШЕНИЕ:")
-            print("  1. Зайдите на https://stepik.org/oauth2/applications/")
-            print("  2. Убедитесь что ваше приложение имеет:")
-            print("     - Client type: Confidential")
-            print("     - Authorization grant type: authorization-code")
-            print("  3. Удалите token_storage.json и перезапустите скрипт")
             return False
         else:
             print(f"[ERROR] Не удалось записаться на курс {course_id}")
@@ -512,10 +521,6 @@ class StepikCourseLoader:
                 print(f"    Fallback успешен: найдено {len(step_ids)} шагов.")
             else:
                 print(f"    [WARN] Шаги не найдены даже после одиночного запроса.")
-                print(f"    [INFO] Возможные причины:")
-                print(f"           - Урок приватный и требует зачисления на курс")
-                print(f"           - У токена нет прав доступа (scope 'write')")
-                print(f"           - Урок действительно пустой")
 
         print(f"    -> Урок {pos}: {title} (Шагов: {len(step_ids)})")
         if not step_ids:
