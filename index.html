@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <title>Knowledge Base RAG</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/axios/dist/axios.min.js"></script>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+  <style>
+    :root{--muted:#6b7280;--accent:#2563eb;--accent-2:#3b82f6;--bg-card:#fff;--prose-bg:#fbfdff;--used-bg:#e6f3ff}
+    body{font-family:"Inter",system-ui,-apple-system,"Segoe UI",Roboto,Arial;margin:0;background:#f8fafc;color:#0f172a;-webkit-font-smoothing:antialiased}
+    .container{max-width:1100px;margin:0 auto;padding:36px 18px}
+    .grid-main{display:grid;grid-template-columns:320px 1fr;gap:28px;align-items:start}
+    @media(max-width:980px){.grid-main{grid-template-columns:1fr;padding:0 8px}}
+    /* settings boxed items */
+    .settings-card{background:var(--bg-card);border-radius:12px;padding:18px;border:1px solid #eef6ff}
+    .setting-item{border:1px solid #eef6ff;border-radius:10px;padding:12px;margin-bottom:12px;background:#fff}
+    .setting-title{display:flex;align-items:center;gap:8px;font-weight:700;color:#334155;margin-bottom:8px}
+    .hint-dot{background:var(--accent);color:white;width:18px;height:18px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-size:12px}
+    .hint-box{display:none;position:absolute;z-index:40;background:#fff;border-radius:8px;padding:10px;border:1px solid #e6eefc;box-shadow:0 10px 30px rgba(2,6,23,0.06)}
+    .hint-wrap{position:relative;display:inline-block}
+    .hint-wrap:hover .hint-box{display:block}
+    /* query area */
+    .query-row{display:flex;gap:16px;align-items:flex-start}
+    .autosize{width:100%;min-height:56px;max-height:60vh;resize:none;overflow:auto;padding:14px 16px;border-radius:12px;border:1px solid #e6eefc;font-size:1.02rem;line-height:1.45;background:#fff;white-space:pre-wrap;word-wrap:break-word}
+    .autosize:focus{outline:none;border-color:var(--accent-2);box-shadow:0 10px 30px rgba(59,130,246,0.08)}
+    .query-actions{display:flex;flex-direction:column;gap:10px;transform:translateX(20%);flex:0 0 auto}
+    .clear-btn{background:#f1f5f9;color:#475569;border:none;border-radius:10px;padding:8px 12px;cursor:pointer;font-weight:700}
+    .search-btn{background:var(--accent);color:white;border:none;border-radius:10px;padding:10px 18px;cursor:pointer;font-weight:700}
+    .small-muted{font-size:0.9rem;color:var(--muted);margin-top:8px}
+    /* answer + prose */
+    .answer-card{background:var(--prose-bg);border-radius:12px;padding:22px;border:1px solid #e6f0ff}
+    .prose{font-size:1.02rem;line-height:1.6;color:#0f172a}
+    /* ensure paragraphs always present, no display:none */
+    .prose p{margin:0 0 14px 0; padding:0; transition:background .18s ease}
+    .prose p.used{background:var(--used-bg); border-radius:8px; padding:8px 10px}
+    /* citation circular badge only */
+    a.cite{display:inline-flex;align-items:center;justify-content:center;text-decoration:none;margin-left:8px}
+    a.cite .badge{background:var(--accent-2);color:white;width:26px;height:26px;border-radius:999px;display:inline-flex;align-items:center;justify-content:center;font-weight:700}
+    a.cite:hover .badge{transform:translateY(-2px);box-shadow:0 8px 20px rgba(59,130,246,0.14)}
+    /* sources list */
+    .source-card{background:#fff;border-radius:12px;padding:16px;border:1px solid #eef6ff;display:flex;justify-content:space-between;gap:12px;cursor:pointer;transition:box-shadow .12s,transform .12s}
+    .source-card.active{border-color:var(--accent-2);background:#f0f8ff;transform:translateY(-3px)}
+    .match{background:#fff4bf;padding:2px 4px;border-radius:4px}
+    .match-context{color:#0b1220;display:block;margin:6px 0;line-height:1.45}
+    @media(max-width:640px){.query-actions{transform:none;flex-direction:row}}
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header style="text-align:center;margin-bottom:14px;">
+      <h1 style="margin:0;font-size:1.4rem;font-weight:800">Knowledge Base RAG</h1>
+      <p style="margin:6px 0 0;color:var(--muted)">Клик на карточке подсвечивает все абзацы ответа, использующие этот источник</p>
+    </header>
+
+    <div class="grid-main">
+      <!-- settings -->
+      <aside>
+        <div class="settings-card">
+          <h2>Настройки</h2>
+
+          <div class="setting-item">
+            <div class="setting-title">Категория
+              <span class="hint-wrap" tabindex="0"><span class="hint-dot">i</span>
+                <div class="hint-box">Фильтрация по тематике.</div>
+              </span>
+            </div>
+            <select v-model="config.category" style="width:100%;margin-top:6px;padding:8px;border-radius:8px">
+              <option :value="null">Все категории</option>
+              <option v-for="c in categories" :key="c" :value="c">{{c}}</option>
+            </select>
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-title">Top K: <strong style="margin-left:8px">{{config.top_k}}</strong></div>
+            <input type="range" v-model.number="config.top_k" min="1" max="20" style="width:100%;margin-top:8px" />
+          </div>
+
+          <div class="setting-item" style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div class="setting-title">Гибридный поиск</div>
+              <div class="small-muted">Включает vector + BM25</div>
+            </div>
+            <input type="checkbox" v-model="config.use_hybrid" />
+          </div>
+
+          <div class="setting-item" style="display:flex;justify-content:space-between;align-items:center">
+            <div>
+              <div class="setting-title">Извлечение сущностей</div>
+              <div class="small-muted">Улучшаем BM25</div>
+            </div>
+            <input type="checkbox" v-model="config.use_entities" />
+          </div>
+
+          <div class="setting-item">
+            <div class="setting-title">Схожесть: <strong style="margin-left:8px">{{Math.round(config.similarity*100)}}%</strong></div>
+            <input type="range" v-model.number="config.similarity" min="0" max="1" step="0.01" style="width:100%;margin-top:8px"/>
+          </div>
+
+          <div style="margin-top:6px">
+            <button @click="rebuildIndex" style="width:100%;padding:10px;border-radius:8px;border:1px solid #dbeafe;background:white;color:var(--accent);font-weight:700">Перестроить BM25</button>
+          </div>
+        </div>
+      </aside>
+
+      <!-- main -->
+      <main>
+        <div style="margin-bottom:14px">
+          <div class="query-row">
+            <textarea ref="queryBox" v-model="query" @input="onInput" @keydown="onKeydown"
+                      placeholder="Введите ваш вопрос..." class="autosize" rows="1"></textarea>
+
+            <div class="query-actions" role="group">
+              <button v-if="query.length" @click="clearQuery" class="clear-btn">✕</button>
+              <button :disabled="loading" @click="search" class="search-btn">{{ loading ? '...' : 'Поиск' }}</button>
+            </div>
+          </div>
+          <div class="small-muted">Enter — отправить · Shift+Enter — новая строка</div>
+        </div>
+
+        <div v-if="result" class="answer-card" style="margin-bottom:16px">
+          <!-- formattedAnswer includes data-sources for each <p> -->
+          <div class="prose" v-html="formattedAnswer"></div>
+        </div>
+
+        <div v-if="processedSources.length" style="display:flex;flex-direction:column;gap:12px">
+          <h3 style="margin:0 0 6px 0;font-weight:700">Ссылки на материалы</h3>
+          <div v-for="(s,i) in processedSources" :key="i" :id="'src-'+(i+1)"
+               :class="['source-card', selectedSourceIndex===i ? 'active' : '']"
+               @click="onSourceClick(i)">
+            <div>
+              <div style="display:flex;gap:8px;align-items:center">
+                <div style="background:#eff6ff;color:#1e3a8a;padding:6px 10px;border-radius:999px;font-weight:700">{{s.category}}</div>
+                <div style="font-family:monospace;color:var(--muted);font-size:0.9rem">ID: {{s.stepId}}</div>
+              </div>
+              <div style="margin-top:8px;font-weight:700">{{s.lesson}}</div>
+              <div style="margin-top:8px;color:var(--muted)">Обновлено: {{s.updatedDate}} · Score: <strong style="color:#10b981">{{s.score.toFixed(3)}}</strong></div>
+              <div v-if="s.highlightedSnippets && s.highlightedSnippets.length" style="margin-top:10px">
+                <div v-for="(sn,idx) in s.highlightedSnippets" :key="idx" class="match-context"><span v-html="sn"></span></div>
+              </div>
+            </div>
+            <div style="display:flex;align-items:flex-start">
+              <div style="font-size:0.8rem;padding:6px 10px;border-radius:8px;background:#f8fafc;color:#334155;font-weight:700">{{s.search_method}}</div>
+            </div>
+          </div>
+        </div>
+      </main>
+    </div>
+
+    <footer style="margin-top:18px;color:var(--muted);font-size:0.9rem">Кликните на карточку источника или на кружок в тексте — соответствующие абзацы ответа подсветятся.</footer>
+  </div>
+
+  <script>
+    const { createApp, ref, onMounted, computed, nextTick } = Vue;
+
+    createApp({
+      setup(){
+        const API = 'http://localhost:8001';
+        const query = ref('');
+        const config = ref({ category:null, top_k:5, use_hybrid:true, use_entities:true, similarity:0.30 });
+        const categories = ref([]);
+        const loading = ref(false);
+        const result = ref(null);
+        const queryBox = ref(null);
+        const selectedSourceIndex = ref(null);
+
+        const adjustTextarea = () => {
+          const el = queryBox.value;
+          if(!el) return;
+          el.style.height = 'auto';
+          const maxH = Math.max(window.innerHeight * 0.5, 300);
+          el.style.height = Math.min(el.scrollHeight, maxH) + 'px';
+        };
+        const onInput = () => adjustTextarea();
+        const onKeydown = (e) => {
+          if(e.key==='Enter' && !e.shiftKey && !e.ctrlKey && !e.metaKey){ e.preventDefault(); search(); }
+          if(e.key==='Escape') e.target.blur();
+        };
+        const clearQuery = async ()=>{
+          query.value='';
+          result.value=null;
+          selectedSourceIndex.value=null;
+          await nextTick(); adjustTextarea();
+          document.querySelectorAll('.prose p.used').forEach(p=>p.classList.remove('used'));
+        };
+        const rebuildIndex = async ()=>{ if(!confirm('Перестроить BM25?')) return; try{ await axios.post(`${API}/rebuild_bm25`); await fetchCategories(); alert('OK'); }catch(e){console.error(e); alert('Ошибка');} };
+        const fetchCategories = async ()=>{ try{ const r = await axios.get(`${API}/categories`); categories.value = r.data.categories || []; }catch(e){console.error(e);} };
+
+        // remove ** markers
+        const stripAsterisks = s => s ? s.replace(/\*\*/g,'') : s;
+
+        const search = async ()=>{
+          if(!query.value.trim()) return;
+          loading.value = true; selectedSourceIndex.value = null;
+          try {
+            const payload = {
+              query: query.value,
+              top_k: config.value.top_k,
+              category: config.value.category,
+              use_hybrid: config.value.use_hybrid,
+              use_entities: config.value.use_entities,
+              similarity: config.value.similarity
+            };
+            const r = await axios.post(`${API}/query`, payload);
+            if(r.data && r.data.answer) r.data.answer = stripAsterisks(r.data.answer);
+            result.value = r.data;
+            await nextTick();
+            computeHighlightsForSources();
+            adjustTextarea();
+          } catch(e) {
+            console.error(e); alert('Ошибка сервера: '+(e.response?.data?.detail||e.message));
+          } finally { loading.value = false; }
+        };
+
+        // ---- key change: we will generate formattedAnswer so each <p> has data-sources attr
+        const escapeHtml = s => s ? String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#039;') : '';
+
+        const formattedAnswer = computed(()=>{
+          if(!result.value || !result.value.answer) return '';
+          let raw = String(result.value.answer || '');
+          raw = raw.replace(/\*\*/g,''); // safety
+          // Normalize CRLF
+          raw = raw.replace(/\r\n/g,'\n');
+          // split paragraphs by two or more newlines
+          const paras = raw.split(/\n{2,}/);
+          const outParas = paras.map((p, idx) => {
+            // find citation numbers like [1], [2] inside paragraph (before escaping)
+            const matches = Array.from(p.matchAll(/\[(\d+)\]/g)).map(m=>m[1]);
+            const unique = Array.from(new Set(matches));
+            const dataSourcesAttr = unique.length ? ` data-sources="${unique.join(',')}"` : '';
+            // Replace citation markers with anchor badges (escape content first)
+            let escaped = escapeHtml(p);
+            // replace [n] with anchor
+            escaped = escaped.replace(/\[(\d+)\]/g, (m,num) => `<a class="cite" href="#src-${num}" data-src="${num}" aria-label="Источник ${num}"><span class="badge">${num}</span></a>`);
+            // replace single newlines inside paragraph with <br>
+            escaped = escaped.replace(/\n/g,'<br>');
+            // stagger delay for animation (kept minimal)
+            const delay = (idx * 0.04).toFixed(2);
+            return `<p style="animation-delay:${delay}s"${dataSourcesAttr}>${escaped}</p>`;
+          });
+          return outParas.join('');
+        });
+
+        // Highlight terms inside sources (kept)
+        const getHighlightTerms = () =>{
+          if(result.value && result.value.extracted_entities && result.value.extracted_entities.length) {
+            return result.value.extracted_entities.map(t=>String(t).trim()).filter(Boolean);
+          }
+          return String(query.value||'').toLowerCase().split(/\W+/).filter(w=>w.length>2);
+        };
+
+        const computeHighlightsForSources = ()=>{
+          const terms = getHighlightTerms();
+          if(!result.value || !result.value.sources) return;
+          const unique = Array.from(new Set(terms.map(t=>t.toLowerCase()))).filter(Boolean).sort((a,b)=>b.length-a.length);
+          const regex = unique.length ? new RegExp('\\b('+unique.map(t=>escapeRegExp(t)).join('|')+')\\b','ig') : null;
+          result.value.sources.forEach(src=>{
+            const text = String(src.text||'');
+            const snippets=[];
+            if(!regex){ src.highlightedSnippets = []; return; }
+            let m; const maxSnips=3; const usedRanges=[];
+            while((m=regex.exec(text))!==null && snippets.length<maxSnips){
+              const start = Math.max(0,m.index-80);
+              const end = Math.min(text.length,m.index+m[0].length+80);
+              if(usedRanges.some(r=>!(end<r[0]||start>r[1]))) continue;
+              usedRanges.push([start,end]);
+              let frag = text.slice(start,end);
+              frag = escapeHtml(frag).replace(regex,'<span class="match">$1</span>');
+              if(start>0) frag='...'+frag;
+              if(end<text.length) frag=frag+'...';
+              snippets.push(frag);
+            }
+            src.highlightedSnippets = snippets;
+          });
+        };
+
+        const escapeRegExp = s => s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+
+        // Highlight paragraphs by data-sources attribute:
+        const highlightAnswerParagraphsForSource = (index) => {
+          // toggle behavior: if same index selected -> clear
+          if(selectedSourceIndex.value===index){
+            selectedSourceIndex.value=null;
+            document.querySelectorAll('.prose p.used').forEach(p=>p.classList.remove('used'));
+            return;
+          }
+          selectedSourceIndex.value=index;
+          // clear previous
+          document.querySelectorAll('.prose p.used').forEach(p=>p.classList.remove('used'));
+          // find all paras and toggle class where data-sources includes index+1
+          const paras = document.querySelectorAll('.prose p[data-sources]');
+          paras.forEach(p=>{
+            const ds = p.getAttribute('data-sources') || '';
+            const parts = ds.split(',').map(x=>x.trim()).filter(Boolean);
+            if(parts.includes(String(index+1))){
+              p.classList.add('used');
+            } else {
+              // ensure others remain normal (no removal/hiding)
+            }
+          });
+          // scroll to first highlighted paragraph if any
+          const first = document.querySelector('.prose p.used');
+          if(first) first.scrollIntoView({behavior:'smooth', block:'center'});
+        };
+
+        // click handler for inline citation badges -> same behavior
+        const handleCitationClicks = (e)=>{
+          const a = e.target.closest('a.cite');
+          if(!a) return;
+          const n = a.getAttribute('data-src');
+          if(!n) return;
+          e.preventDefault();
+          const idx = parseInt(n,10)-1;
+          highlightAnswerParagraphsForSource(idx);
+        };
+
+        const onSourceClick = (index) => {
+          highlightAnswerParagraphsForSource(index);
+        };
+
+        onMounted(async()=>{
+          await fetchCategories();
+          await nextTick();
+          adjustTextarea();
+          window.addEventListener('resize', adjustTextarea);
+          document.addEventListener('click', handleCitationClicks);
+        });
+
+        return {
+          query, queryBox, config, categories, loading, result,
+          clearQuery, search, onInput, onKeydown, formattedAnswer,
+          processedSources: computed(()=> result.value ? (result.value.sources || []).map(s=>{
+            const stepId = s.text?.match(/STEP ID:\s*(\d+)/i)?.[1] || '—';
+            const updatedRaw = s.text?.match(/UPDATED:\s*([\d\-T:Z]+)/i)?.[1] || null;
+            const updated = updatedRaw ? (new Date(updatedRaw).toLocaleString('ru-RU')) : '—';
+            return {...s, stepId, updatedDate: updated, highlightedSnippets: s.highlightedSnippets || []};
+          }) : []),
+          rebuildIndex, selectedSourceIndex, onSourceClick
+        };
+      }
+    }).mount('body');
+  </script>
+</body>
+</html>
