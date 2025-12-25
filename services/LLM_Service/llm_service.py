@@ -26,6 +26,10 @@ class GeminiService:
             os.environ['https_proxy'] = proxy_url
             os.environ['HTTP_PROXY'] = proxy_url
             os.environ['HTTPS_PROXY'] = proxy_url
+
+
+            os.environ['no_proxy'] = "localhost,127.0.0.1,0.0.0.0,minio" 
+            os.environ['NO_PROXY'] = "localhost,127.0.0.1,0.0.0.0,minio"
             print(f"[Gemini] Настроен прокси через env: {proxy_url}")
 
         # Конфигурируем SDK
